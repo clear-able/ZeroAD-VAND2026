@@ -1,0 +1,371 @@
+% CVPR 2026 Paper Template
+\documentclass[10pt,twocolumn,letterpaper]{article}
+
+\usepackage{cvpr}  % Camera-ready version
+\input{preamble}
+
+\definecolor{cvprblue}{rgb}{0.21,0.49,0.74}
+\usepackage[pagebackref,breaklinks,colorlinks,allcolors=cvprblue]{hyperref}
+
+\def\confName{CVPR}
+\def\confYear{2026}
+
+%%%%%%%%% TITLE
+\title{ZeroAD: Zero-Shot Industrial Anomaly Detection \\via Multi-Scale CLIP Feature Scoring \\
+\large VAND 4.0 Challenge -- Industrial Track (Zero-Shot)}
+
+%%%%%%%%% AUTHORS
+\author{
+Long Chen$^{1,2}$\\
+$^{1}$Guangdong Artificial Intelligence and Digital Economy Laboratory (Shenzhen)\\
+$^{2}$Shenzhen University, Shenzhen, China\\
+{\tt\small chenlong@gml.ac.cn}
+}
+
+\begin{document}
+\maketitle
+
+%%======================================================================
+%% ABSTRACT
+%%======================================================================
+\begin{abstract}
+We present ZeroAD, a parameter-efficient zero-shot anomaly detection method for the VAND 4.0 Industrial Track (Zero-Shot category). The core idea is to leverage the rich visual representations learned by a frozen CLIP ViT-L/14@336px backbone and train only a minimal set of linear scoring heads for anomaly detection. Specifically, we extract multi-scale features from 5 intermediate CLIP transformer layers and attach 10 independent linear projections (768$\to$1) --- 5 for image-level classification and 5 for pixel-level segmentation --- resulting in only 7,690 trainable parameters. Training is performed on the test split of MVTec AD using cross-entropy and Focal/Dice losses. \textbf{No images from the MVTec AD 2 dataset are used at any stage --- neither for training, validation, nor hyperparameter tuning.} On MVTec AD 2 \texttt{test\_public}, our method achieves a mean SegF1 of 22.9\%. The codebase, model weights, and all training configurations are publicly available at \url{https://github.com/clear-able/ZeroAD-VAND2026}.
+\end{abstract}
+
+%%======================================================================
+%% 1. PARTICIPANT INFORMATION
+%%======================================================================
+\section{Participant Information}
+
+\noindent\textbf{Primary Representative:}
+\begin{itemize}[leftmargin=*,nosep]
+  \item \textbf{Name:} Long Chen
+  \item \textbf{Affiliation:} Guangdong Artificial Intelligence and Digital Economy Laboratory (Shenzhen); Shenzhen University, Shenzhen, China
+  \item \textbf{Contact:} chenlong@gml.ac.cn
+\end{itemize}
+
+%%======================================================================
+%% 2. SUBMISSION INFORMATION
+%%======================================================================
+\section{Submission Information}
+
+\begin{itemize}[leftmargin=*,nosep]
+  \item \textbf{Track:} Industrial
+  \item \textbf{Industrial Track?} Yes
+  \item \textbf{Zero-Shot?} Yes
+  \item \textbf{Retail Track?} No
+  \item \textbf{Off-the-shelf VLM submission?} No
+  \item \textbf{Code Repository:} \url{https://github.com/clear-able/ZeroAD-VAND2026}
+\end{itemize}
+
+%%======================================================================
+%% 3. INTRODUCTION
+%%======================================================================
+\section{Introduction}
+
+\subsection{Background}
+
+Anomaly detection in industrial manufacturing is essential for automated quality inspection. Detecting surface defects, structural anomalies, and contamination in products requires both image-level classification (``is this product defective?'') and pixel-level localization (``where is the defect?''). Traditional supervised approaches demand large, category-specific labeled datasets, which are expensive to collect and do not generalize across product types.
+
+Vision-language models such as CLIP~\cite{radford2021clip} have recently emerged as powerful feature extractors that learn generalizable visual representations from hundreds of millions of image-text pairs. Several works~\cite{anomalyclip} have demonstrated that CLIP features can be adapted for anomaly detection. However, many existing approaches either require complex prompt engineering, large learnable modules, or access to target-domain data, limiting their applicability in true zero-shot settings.
+
+Our work is motivated by a key observation: \textbf{CLIP's intermediate-layer features already encode sufficient information to distinguish normal from anomalous regions.} Rather than designing complex adapters or decoders, we hypothesize that a single linear projection per feature layer suffices to extract anomaly signals. This leads to an extremely parameter-efficient design that is inherently resistant to overfitting and generalizes well across domains.
+
+\subsection{Challenge Description}
+
+The VAND 4.0 Industrial Track evaluates anomaly segmentation methods on the MVTec AD 2 dataset~\cite{mvtecad2}, which introduces 8 new industrial product categories (can, fabric, fruit\_jelly, rice, sheet\_metal, vial, wallplugs, walnuts) with multiple test splits. The primary evaluation metric is pixel-level SegF1 (F1 score at the optimal threshold).
+
+The \textbf{Zero-Shot category} imposes the following constraint: \emph{no images from the MVTec AD 2 dataset may be used during training.} This tests whether the method can generalize to entirely unseen product types and defect patterns without any adaptation.
+
+%%======================================================================
+%% 4. METHODOLOGY
+%%======================================================================
+\section{Methodology}
+
+\subsection{Model Design}
+
+\paragraph{Approach.}
+Our approach is built on three design principles:
+\begin{enumerate}[nosep]
+  \item \textbf{Freeze everything possible:} The CLIP backbone contains 304M parameters trained on web-scale data. Fine-tuning it on a small anomaly detection dataset would destroy these generalizable representations and cause severe overfitting.
+  \item \textbf{Minimize learnable parameters:} By using only linear layers (768$\to$1), we reduce the risk of memorizing source-domain-specific patterns that do not transfer to the target domain.
+  \item \textbf{Exploit multi-scale features:} Different transformer layers capture different levels of abstraction. Shallow layers (block 12) encode texture and edge information; deep layers (block 24) encode semantic content. Using 5 layers provides complementary anomaly signals.
+\end{enumerate}
+
+We also conducted extensive ablation studies to validate these principles (see Section~\ref{sec:ablation}).
+
+\paragraph{Architecture.}
+The ZeroAD model consists of three components:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Frozen CLIP ViT-L/14@336px Encoder.} We use the visual encoder from CLIP ViT-L/14@336px (OpenAI release). The image is resized to 518$\times$518, yielding a 37$\times$37 patch grid (1,369 patches). We extract features from 5 intermediate transformer blocks: layers 12, 15, 18, 21, and 24. Each layer's output passes through the frozen \texttt{ln\_post} layer normalization and \texttt{proj} linear projection (1024$\to$768), producing:
+  \begin{itemize}[nosep]
+    \item CLS token: $\mathbf{c}^{(i)} \in \mathbb{R}^{768}$
+    \item Patch tokens: $\mathbf{P}^{(i)} \in \mathbb{R}^{1369 \times 768}$
+  \end{itemize}
+  Both are L2-normalized before scoring: $\hat{\mathbf{c}}^{(i)} = \mathbf{c}^{(i)} / \|\mathbf{c}^{(i)}\|_2$.
+
+  \item \textbf{Image-Level Anomaly Scorers (5 layers).} For each layer $i \in \{1,...,5\}$, a linear layer $W_{\text{cls}}^{(i)} \in \mathbb{R}^{768 \times 1}$ maps the normalized CLS token to a scalar anomaly logit:
+  \begin{equation}
+    s_{\text{cls}}^{(i)} = W_{\text{cls}}^{(i)\top} \hat{\mathbf{c}}^{(i)} + b_{\text{cls}}^{(i)}
+  \end{equation}
+  The output is paired with a fixed zero (representing ``normal'') to form a 2-class logit: $\mathbf{l}_{\text{cls}}^{(i)} = [0,\; s_{\text{cls}}^{(i)}]$.
+
+  \item \textbf{Pixel-Level Anomaly Scorers (5 layers).} Similarly, for each layer $i$, a linear layer $W_{\text{seg}}^{(i)} \in \mathbb{R}^{768 \times 1}$ scores each patch independently:
+  \begin{equation}
+    \mathbf{S}_{\text{seg}}^{(i)} = \text{Reshape}_{37 \times 37}\!\left(W_{\text{seg}}^{(i)\top} \hat{\mathbf{P}}^{(i)} + b_{\text{seg}}^{(i)}\right)
+  \end{equation}
+  The result is upsampled to $518 \times 518$ via bilinear interpolation.
+\end{enumerate}
+
+\noindent\textbf{Total trainable parameters:} $5 \times 2 \times (768 + 1) = 7{,}690$ --- less than 0.008M.
+
+\paragraph{Prompting / Training.}
+This method does \textbf{not} use text prompts or VLM-based prompting. It is a pure vision approach.
+
+\textbf{Training data:} The test split of MVTec AD~\cite{mvtecad} (15 categories), which contains both normal and anomalous images with pixel-level ground truth masks. \textbf{No MVTec AD 2 data is used.}
+
+\textbf{Loss function:} The total loss combines image-level cross-entropy and pixel-level Focal/Dice losses across all 5 layers:
+\begin{equation}
+  \mathcal{L} = \underbrace{\sum_{i=1}^{5} \text{CE}\!\left(\mathbf{l}_{\text{cls}}^{(i)},\, y\right)}_{\text{image-level}} + \;\lambda \underbrace{\sum_{i=1}^{5} \left[\mathcal{L}_{\text{focal}}^{(i)} + \mathcal{L}_{\text{dice,anom}}^{(i)} + \mathcal{L}_{\text{dice,norm}}^{(i)}\right]}_{\text{pixel-level}}
+\end{equation}
+where $y$ is the image-level binary label, $\lambda = 4$ (following AnomalyCLIP~\cite{anomalyclip}), and the pixel-level losses operate on softmax-normalized logit pairs $[0, s]$. Focal loss~\cite{focalloss} addresses class imbalance (anomalous pixels are rare), while Dice loss encourages spatial overlap with ground truth masks.
+
+\textbf{Training configuration:}
+\begin{itemize}[nosep]
+  \item Optimizer: Adam (lr $= 10^{-3}$, $\beta = (0.5, 0.999)$)
+  \item Batch size: 8
+  \item Epochs: 15
+  \item Data augmentation: None
+  \item Learning rate scheduler: None (constant)
+  \item Random seed: 111
+  \item Image size: $518 \times 518$ (bicubic resize + center crop)
+  \item Normalization: CLIP standard (mean$=[0.481, 0.458, 0.408]$, std$=[0.269, 0.261, 0.276]$)
+\end{itemize}
+
+\subsection{Inference Pipeline}
+
+\begin{enumerate}[nosep]
+  \item Extract L2-normalized CLS and patch features from 5 CLIP layers.
+  \item Compute per-layer image-level logit $s_{\text{cls}}^{(i)}$ and pixel-level map $\mathbf{S}_{\text{seg}}^{(i)}$.
+  \item Average across 5 layers: $\bar{s}_{\text{cls}} = \frac{1}{5}\sum_i s_{\text{cls}}^{(i)}$ and $\bar{\mathbf{S}}_{\text{seg}} = \frac{1}{5}\sum_i \mathbf{S}_{\text{seg}}^{(i)}$.
+  \item Compute anomaly map via the formula from AnomalyCLIP~\cite{anomalyclip}:
+  \begin{equation}
+    \mathbf{M} = \frac{\bar{\mathbf{S}}_{\text{seg}}^{(\text{anom})} + 1 - \bar{\mathbf{S}}_{\text{seg}}^{(\text{norm})}}{2}
+  \end{equation}
+  \item Fuse image-level and pixel-level scores:
+  \begin{equation}
+    s_{\text{final}} = (1 - \lambda_p)\, \bar{s}_{\text{cls}} + \lambda_p\, \max(\mathbf{M}), \quad \lambda_p = 0.5
+  \end{equation}
+  \item Apply Gaussian smoothing ($\sigma = 4$) to the anomaly map $\mathbf{M}$.
+\end{enumerate}
+
+%%======================================================================
+%% 5. DATASETS AND EVALUATION
+%%======================================================================
+\section{Datasets and Evaluation}
+
+\subsection{Benchmark Dataset Utilization}
+
+\textbf{Training dataset:} MVTec AD~\cite{mvtecad} test split --- 15 industrial product categories with pixel-level defect annotations. This dataset is publicly available and is \textbf{entirely separate from MVTec AD 2}.
+
+\textbf{Preprocessing:}
+\begin{itemize}[nosep]
+  \item Resize to $518 \times 518$ using bicubic interpolation
+  \item Center crop to $518 \times 518$
+  \item Normalize with CLIP statistics
+  \item Ground truth masks binarized at threshold 0.5
+\end{itemize}
+
+\textbf{No data augmentation} is applied. No validation set is used; all hyperparameters are fixed a priori.
+
+\subsection{Evaluation Metrics}
+
+We evaluate on MVTec AD 2 \texttt{test\_public} (8 categories) using:
+\begin{itemize}[nosep]
+  \item \textbf{SegF1} (primary, per competition): pixel-level F1 at optimal threshold
+  \item I-AUROC, I-AP: image-level classification metrics
+  \item P-AUROC, P-AUPRO: pixel-level localization metrics
+\end{itemize}
+
+\subsection{Evaluation Setup --- Zero-Shot Compliance}
+\label{sec:zeroshot}
+
+Our method strictly adheres to the zero-shot protocol defined by the VAND 4.0 Industrial Track:
+
+\begin{enumerate}[nosep]
+  \item \textbf{No MVTec AD 2 data used at any stage.} Not for training, not for validation, not for hyperparameter tuning, not for threshold selection.
+  \item \textbf{The model is not updated during inference.} It remains in its initial trained state. No test-time adaptation or online learning is performed.
+  \item \textbf{No information from target-category test samples is used during inference} for any other test sample. Each image is processed independently.
+  \item \textbf{Pre-training strategy:}
+  \begin{itemize}[nosep]
+    \item Backbone: CLIP ViT-L/14@336px from OpenAI
+    \item Pretrained on: LAION-400M / OpenAI WebImageText (web-scraped image-text pairs)
+    \item No modifications to the pretrained weights
+  \end{itemize}
+  \item \textbf{Training data:} MVTec AD test split only (15 categories, publicly available)
+  \item \textbf{All hyperparameters are fixed} (lr, epochs, batch size, $\lambda$, $\sigma$) and were not tuned on MVTec AD 2.
+\end{enumerate}
+
+%%======================================================================
+%% 6. RESULTS
+%%======================================================================
+\section{Results}
+
+\subsection{Performance Metrics}
+
+Table~\ref{tab:results} shows per-category SegF1 on MVTec AD 2 \texttt{test\_public} for both training sources.
+
+\begin{table}[h]
+\centering
+\small
+\caption{SegF1 (\%) on MVTec AD 2 \texttt{test\_public}. Two training sources compared.}
+\label{tab:results}
+\begin{tabular}{l|cc}
+\hline
+Category & MVTec AD trained & VisA trained \\
+\hline
+can & 0.4 & 0.1 \\
+fabric & 7.1 & 1.5 \\
+fruit\_jelly & 32.4 & 8.8 \\
+rice & 43.8 & 0.6 \\
+sheet\_metal & 15.6 & 1.5 \\
+vial & 29.7 & 13.9 \\
+wallplugs & 8.0 & 3.7 \\
+walnuts & 46.0 & 6.5 \\
+\hline
+\textbf{Mean} & \textbf{22.9} & 4.6 \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Comparison and Analysis}
+
+The MVTec AD-trained model outperforms the VisA-trained variant by a large margin (22.9\% vs.\ 4.6\% mean SegF1). This is attributable to the domain similarity between MVTec AD and MVTec AD 2: both focus on industrial surface defects with similar imaging conditions.
+
+\textbf{Per-category observations:}
+\begin{itemize}[nosep]
+  \item \textbf{Best:} walnuts (46.0\%) and rice (43.8\%) --- textured surfaces where anomalies manifest as texture irregularities that CLIP features capture well.
+  \item \textbf{Moderate:} fruit\_jelly (32.4\%), vial (29.7\%) --- mixed defect types.
+  \item \textbf{Challenging:} can (0.4\%) --- smooth metallic surfaces where defects are subtle color/reflectance changes, difficult for frozen CLIP features to detect without task-specific adaptation.
+\end{itemize}
+
+%%======================================================================
+%% 7. DISCUSSION
+%%======================================================================
+\section{Discussion}
+
+\subsection{Challenges and Solutions}
+
+\textbf{Challenge 1: Domain gap.} The training domain (MVTec AD) and target domain (MVTec AD 2) contain entirely different product categories. We address this by:
+\begin{itemize}[nosep]
+  \item Using frozen CLIP features that are domain-agnostic by design (pretrained on 400M+ diverse images).
+  \item Training only 7,690 parameters to minimize the risk of memorizing source-domain-specific patterns.
+  \item Using multi-scale features (5 layers) for robustness.
+\end{itemize}
+
+\textbf{Challenge 2: Softmax suppression.} In early ablation experiments (\#9 vs \#11 in our logs), we found that applying softmax to the 2-class logits $[0, s]$ degrades pixel-level performance. While softmax does not affect ranking metrics (AUROC), it compresses the logit range and hurts threshold-dependent metrics like SegF1. \textbf{Solution:} Remove softmax and use raw logits directly.
+
+\textbf{Challenge 3: Scorer complexity.} We tested an MLP scorer (768$\to$512$\to$1, \#8) and found it performed comparably on image-level metrics but worse on pixel-level P-AUPRO (62.4\% vs 87.5\%). The additional capacity enables overfitting to source-domain pixel patterns. \textbf{Solution:} Use the simplest possible scorer (single linear layer).
+
+\subsection{Model Robustness and Adaptability}
+
+The model exhibits several desirable robustness properties:
+\begin{itemize}[nosep]
+  \item \textbf{Frozen backbone} prevents catastrophic forgetting of CLIP's pretrained knowledge.
+  \item \textbf{Extreme parameter efficiency} (7,690 params) provides strong regularization.
+  \item \textbf{Multi-layer fusion} averages over 5 independent scoring heads, providing ensemble-like robustness.
+  \item \textbf{No data augmentation or scheduling} reduces the number of ``hidden'' hyperparameters.
+\end{itemize}
+
+The method adapts to new domains by simply retraining the 10 linear layers on a different source dataset (e.g., MVTec AD vs.\ VisA), which takes approximately 5 minutes on a single GPU.
+
+\subsection{Model Efficiency}
+
+\begin{table}[h]
+\centering
+\small
+\caption{Computational cost of ZeroAD.}
+\begin{tabular}{l|r}
+\hline
+Metric & Value \\
+\hline
+Trainable parameters & 7,690 (0.008M) \\
+Total parameters (incl.\ frozen CLIP) & 304M \\
+Training time (15 epochs, single GPU) & $\sim$5 min \\
+Inference speed (RTX 3090) & $\sim$15 img/s \\
+Checkpoint size & 38 KB \\
+CLIP model size (auto-downloaded) & 890 MB \\
+Peak GPU memory (inference, bs=1) & $\sim$4 GB \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Zero-Shot Compliance}
+\label{sec:zs_compliance}
+
+As required by the VAND 4.0 Industrial Track Zero-Shot rules:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Pre-training strategy:} We use the publicly released CLIP ViT-L/14@336px model from OpenAI. The model was pretrained on a large-scale web-scraped image-text dataset (LAION-400M / WebImageText). We do not modify the pretrained weights in any way.
+  \item \textbf{Confirmation: No MVTec AD 2 data was used during training.} Our training pipeline loads only the MVTec AD dataset (15 categories). The MVTec AD 2 dataset (8 categories) is used exclusively for evaluation after training is complete. No images, labels, or statistics from MVTec AD 2 influence the model in any way.
+  \item \textbf{Model specification:} CLIP ViT-L/14@336px, OpenAI release. Downloaded from \url{https://openaipublic.azureedge.net/clip/models/}. SHA256 checksum: \texttt{3035c92b...}. No fine-tuning of backbone weights.
+\end{enumerate}
+
+\subsection{Ablation Studies}
+\label{sec:ablation}
+
+During development, we conducted systematic ablation studies on the zero-shot framework. Key findings (evaluated on MVTec AD cross-domain):
+
+\begin{table}[h]
+\centering
+\small
+\caption{Key ablation results (VisA$\to$MVTec, zero-shot).}
+\begin{tabular}{l|cccc}
+\hline
+Variant & I-AUC & I-AP & P-AUC & P-PRO \\
+\hline
+MLP 768$\to$512$\to$1 (\#8) & 89.1 & 93.8 & 88.6 & 62.4 \\
+Linear 768$\to$1 + softmax (\#9) & 88.6 & 93.9 & 91.2 & 84.7 \\
+Dual scorers + softmax (\#10) & 89.0 & 94.0 & 91.3 & 72.2 \\
+\textbf{Linear 768$\to$1, no softmax (\#11)} & \textbf{89.5} & \textbf{94.3} & 91.1 & \textbf{87.5} \\
+\hline
+\end{tabular}
+\end{table}
+
+\textbf{Key takeaways:}
+\begin{itemize}[nosep]
+  \item Removing softmax improved P-AUPRO from 84.7\% to 87.5\% (\#9$\to$\#11).
+  \item Simpler scorer (linear) outperformed MLP on P-AUPRO by +25.1\% (\#8 vs \#11).
+  \item Using two independent scorers for normal/anomaly (\#10) hurt P-AUPRO vs.\ fixing normal logit to 0 (\#11).
+  \item \textbf{Simplicity wins:} the least complex variant (\#11) achieved the best overall results.
+\end{itemize}
+
+\subsection{Future Work}
+
+\begin{itemize}[nosep]
+  \item \textbf{Learnable layer fusion:} Replace simple averaging with learned attention over 5 layers.
+  \item \textbf{Category-adaptive thresholding:} Learn per-category thresholds on a validation set to optimize SegF1.
+  \item \textbf{Few-shot extension:} When a small number of reference images are available, combine with PatchCore-style nearest-neighbor matching (our \#12 experiment achieved 91.2\% I-AUROC with 8-shot).
+  \item \textbf{Larger backbones:} Explore ViT-G or SigLIP for richer features.
+\end{itemize}
+
+%%======================================================================
+%% 8. CONCLUSION
+%%======================================================================
+\section{Conclusion}
+
+ZeroAD demonstrates that effective zero-shot anomaly detection can be achieved with extreme parameter efficiency. By freezing a CLIP ViT-L/14@336px backbone and training only 7,690 parameters (10 linear layers), we achieve 22.9\% mean SegF1 on MVTec AD 2 \texttt{test\_public} without using any target-domain data. Through systematic ablation studies, we showed that simplicity is key: a single linear projection per layer outperforms MLP variants, dual-scorer designs, and softmax normalization. The lightweight design (38 KB checkpoint, 5-minute training) enables rapid deployment to new inspection scenarios.
+
+\textbf{Zero-shot declaration:} No images from the MVTec AD 2 dataset were used during training. The model relies solely on frozen CLIP pretrained features and 10 lightweight linear scoring heads trained on MVTec AD.
+
+%%======================================================================
+%% REFERENCES
+%%======================================================================
+{
+    \small
+    \bibliographystyle{ieeenat_fullname}
+    \bibliography{main}
+}
+
+\end{document}
